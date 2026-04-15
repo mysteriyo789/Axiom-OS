@@ -1,0 +1,20 @@
+name: Build Axiom OS
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Build Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap squashfs-tools xorriso mtools
+      - name: Run Build
+        run: |
+          chmod +x scripts/build_axiom.sh
+          ./scripts/build_axiom.sh
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: AxiomOS-Output
+          path: output/AxiomOS.iso
