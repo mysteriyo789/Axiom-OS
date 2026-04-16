@@ -1,14 +1,18 @@
 #!/bin/bash
 set -e
 
-# --- 1. SETUP ---
+# --- 1. RUNNER OPTIMIZATION ---
+# This clears ~20GB of space to prevent "No space left on device" errors
+echo "--- Optimizing Disk Space for GitHub Runner ---"
+sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell || true
+
 ROOT=$(pwd)/axiom_rootfs
 ISO_DIR=$(pwd)/axiom_iso
 mkdir -p "$ROOT" "$ISO_DIR/live" output
 export DEBIAN_FRONTEND=noninteractive
 
 # --- 2. BOOTSTRAP ---
-echo "--- Bootstrapping Core ---"
+echo "--- Bootstrapping Base System ---"
 sudo debootstrap --arch amd64 jammy "$ROOT" http://azure.archive.ubuntu.com/ubuntu/
 
 # --- 3. CHROOT CUSTOMIZATION ---
@@ -21,76 +25,69 @@ sudo chroot "$ROOT" /bin/bash <<EOF
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 
-# Mirrors & Updates
+# Setup Repositories
 printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse\n" > /etc/apt/sources.list
 printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse\n" >> /etc/apt/sources.list
 apt-get update
 
-# AXIOM CORE STACK
-# Includes: Desktop, Kernel, Adaptive Hardware Drivers, Recovery, and Input Methods
-apt-get install -y --yes -o Dpkg::Options::="--force-confold" --no-install-recommends \
-    linux-generic initramfs-tools casper wget ca-certificates \
-    sddm plasma-desktop plasma-nm network-manager \
-    ubiquity ubiquity-frontend-gtk spectacle ark \
-    iio-sensor-proxy power-profiles-daemon libinput-tools \
-    maliit-framework maliit-keyboard-qt5 \
-    timeshift okular discover plasma-systemmonitor \
-    filelight ufw systemsettings
+# Pre-configure SDDM to prevent the installer from hanging on a prompt
+echo "sddm shared/default-x-display-manager select sddm" | debconf-set-selections
 
-# Install Chrome (The PWA Engine)
+# Step-wise installation (Better for low-memory environments)
+echo "--- Installing Core Components ---"
+apt-get install -y --no-install-recommends linux-generic initramfs-tools casper wget ca-certificates
+apt-get install -y --no-install-recommends sddm plasma-desktop plasma-nm network-manager
+apt-get install -y --no-install-recommends ubiquity ubiquity-frontend-gtk spectacle ark 
+apt-get install -y --no-install-recommends iio-sensor-proxy power-profiles-daemon libinput-tools
+apt-get install -y --no-install-recommends maliit-framework maliit-keyboard-qt5
+apt-get install -y --no-install-recommends timeshift okular discover plasma-systemmonitor filelight ufw systemsettings
+
+# Install Google Chrome (PWA Engine)
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-apt-get install -y ./google-chrome-stable_current_amd64.deb
+apt-get install -y ./google-chrome-stable_current_amd64.deb || apt-get install -f -y
 rm google-chrome-stable_current_amd64.deb
 
-# --- AXIOM NATIVE SETTINGS & TOOLS ---
+# --- AXIOM SYSTEM SCRIPTS ---
 
-# Device Mode Toggle (UI Scaling)
+# 1. Device Mode Toggle (Adaptive UI logic)
 cat <<'EOT' > /usr/local/bin/axiom-mode-toggle
 #!/bin/bash
 MODE=\$1
 CONF="\$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-if [ "\$MODE" == "tablet" ] || [ "\$(grep "Thickness=44" "\$CONF")" ]; then
+# If no mode provided, toggle based on current thickness
+if [ "\$MODE" == "" ]; then
+    if grep -q "Thickness=44" "\$CONF"; then MODE="tablet"; else MODE="laptop"; fi
+fi
+
+if [ "\$MODE" == "tablet" ]; then
     sed -i 's/Thickness=44/Thickness=64/g' "\$CONF"
-    notify-send "Axiom OS" "Tablet Mode: UI Optimized for Touch"
+    notify-send "Axiom OS" "Adaptive UI: Tablet Mode"
 else
     sed -i 's/Thickness=64/Thickness=44/g' "\$CONF"
-    notify-send "Axiom OS" "Laptop Mode: UI Optimized for Mouse"
+    notify-send "Axiom OS" "Adaptive UI: Laptop Mode"
 fi
 busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshCurrentShell
 EOT
 
-# Dark Mode & Shelf Toggles
-cat <<'EOT' > /usr/local/bin/axiom-dark-toggle
+# 2. Universal Hardware Monitor (Auto-Detect Hinge/Detachment)
+cat <<'EOT' > /usr/local/bin/axiom-hardware-monitor
 #!/bin/bash
-look-and-feeltool --list | grep -q "dark" && look-and-feeltool -a org.kde.breeze.desktop || look-and-feeltool -a org.kde.breezedark.desktop
+# Monitor libinput for generic tablet-mode switch events
+stdbuf -oL libinput debug-events | while read -r line; do
+    if echo "\$line" | grep -q "tablet-mode state 1"; then
+        /usr/local/bin/axiom-mode-toggle tablet
+    elif echo "\$line" | grep -q "tablet-mode state 0"; then
+        /usr/local/bin/axiom-mode-toggle laptop
+    fi
+done
 EOT
 
-cat <<'EOT' > /usr/local/bin/axiom-shelf-toggle
-#!/bin/bash
-CONF="\$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-grep -q "Floating=1" "\$CONF" && sed -i 's/Floating=1/Floating=0/g' "\$CONF" || (sed -i 's/Floating=0/Floating=1/g' "\$CONF" || sed -i '/\[Panels\]\[1\]/a Floating=1' "\$CONF")
-busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshCurrentShell
-EOT
-
-chmod +x /usr/local/bin/axiom-mode-toggle /usr/local/bin/axiom-dark-toggle /usr/local/bin/axiom-shelf-toggle
-
-# Register Settings Entries (The Professional Suite)
-mkdir -p /usr/share/applications
+# 3. Settings Shortcuts
 cat <<EOT > /usr/share/applications/axiom-mode.desktop
 [Desktop Entry]
 Name=Device Mode
 Exec=axiom-mode-toggle
 Icon=input-tablet
-Type=Application
-Categories=Settings;
-X-KDE-Settings-ParentCategory=appearance
-EOT
-
-cat <<EOT > /usr/share/applications/axiom-dark.desktop
-[Desktop Entry]
-Name=Dark Mode
-Exec=axiom-dark-toggle
-Icon=preferences-desktop-color
 Type=Application
 Categories=Settings;
 X-KDE-Settings-ParentCategory=appearance
@@ -106,42 +103,47 @@ Categories=Settings;
 X-KDE-Settings-ParentCategory=displayandmonitor
 EOT
 
-# --- AXIOM STORE (PWA INTEGRATION) ---
-declare -A PWAS=( ["Calendar"]="https://calendar.google.com" ["Keep"]="https://keep.google.com" ["Meet"]="https://meet.google.com" ["Photos"]="https://photos.google.com" ["Maps"]="https://maps.google.com" )
+# 4. Axiom Store PWAs
+declare -A PWAS=( ["Calendar"]="https://calendar.google.com" ["Keep"]="https://keep.google.com" ["Meet"]="https://meet.google.com" ["Photos"]="https://photos.google.com" )
 for NAME in "\${!PWAS[@]}"; do
     URL=\${PWAS[\$NAME]}
     echo -e "[Desktop Entry]\nName=\$NAME\nExec=google-chrome-stable --app=\$URL\nIcon=google-chrome\nType=Application\nCategories=AxiomStore;" > /usr/share/applications/axiom-\${NAME,,}.desktop
 done
 
-# --- SYSTEM DEFAULTS (SKEL) ---
-mkdir -p /etc/skel/.config
+chmod +x /usr/local/bin/axiom-*
+
+# --- USER DEFAULTS & UI ---
+mkdir -p /etc/skel/.config/autostart
+
+# Maliit keyboard for focus-aware input (Laptop or Tablet mode)
 cat <<EOT > /etc/skel/.config/kwinrc
 [Wayland]
 InputMethod=/usr/share/applications/com.github.maliit.keyboard.desktop
 EOT
 
+# Default Taskbar and Applets
 cat <<EOT > /etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc
 [Panels][1]
 Alignment=Center
 Location=Bottom
 Thickness=44
 LengthMode=Fill
-Floating=0
 [Applets][2]
 plugin=org.kde.plasma.taskmanager
-Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,gmail.desktop,docs.desktop,drive.desktop,files.desktop,settings.desktop,health.desktop,org.kde.discover.desktop
-[Applets][3]
-plugin=org.kde.plasma.battery
-Appearance=showPercentage:true
+Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,gmail.desktop,docs.desktop,drive.desktop,files.desktop,settings.desktop,org.kde.plasma-systemmonitor.desktop,org.kde.discover.desktop
 EOT
 
-# Cleaning Bloat
-apt-get purge -y thunderbird libreoffice* gnome-software kwrite kate
+# Register Background Monitor
+echo -e "[Desktop Entry]\nExec=axiom-hardware-monitor\nType=Application\nName=Axiom Monitor" > /etc/skel/.config/autostart/axiom-monitor.desktop
+
+# Final Cleanup to keep SquashFS size low
 apt-get autoremove -y
 apt-get clean
+rm -rf /var/lib/apt/lists/*
 EOF
 
 # --- 4. PACKAGING ---
+echo "--- Compressing File System (SquashFS) ---"
 sudo umount -l "$ROOT/dev" "$ROOT/run" "$ROOT/proc" "$ROOT/sys" || true
 sudo cp "$ROOT"/boot/vmlinuz-*-generic "$ISO_DIR/live/vmlinuz"
 sudo cp "$ROOT"/boot/initrd.img-*-generic "$ISO_DIR/live/initrd"
