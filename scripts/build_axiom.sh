@@ -1,24 +1,18 @@
 #!/bin/bash
 set -e
 
-# --- FIX 1: Robust Pathing ---
-# Using absolute paths and ensuring cleanup of previous failed builds
+# --- 1. Environment & Path Fixes ---
 ROOT=$(pwd)/axiom_rootfs
 ISO_DIR=$(pwd)/axiom_iso
 mkdir -p "$ROOT" "$ISO_DIR/live" output
 export DEBIAN_FRONTEND=noninteractive
 
-# --- FIX 2: Dependency Check ---
-# Ensure debootstrap is present before starting
-if ! command -v debootstrap &> /dev/null; then
-    sudo apt-get update && sudo apt-get install -y debootstrap
-fi
-
-echo "--- Stage 1: Bootstrapping Base System ---"
+# --- 2. Base System Bootstrapping ---
+echo "--- Stage 1: Bootstrapping ---"
 sudo debootstrap --arch amd64 jammy "$ROOT" http://archive.ubuntu.com/ubuntu/
 
-echo "--- Stage 2: Customizing the Google Experience ---"
-# Safe Mounts
+# --- 3. System Customization ---
+echo "--- Stage 2: Branding & Google Experience ---"
 sudo mount --bind /dev "$ROOT/dev"
 sudo mount --bind /run "$ROOT/run"
 sudo mount -t proc proc "$ROOT/proc"
@@ -27,47 +21,65 @@ sudo mount -t sysfs sys "$ROOT/sys"
 sudo chroot "$ROOT" /bin/bash <<EOF
 export DEBIAN_FRONTEND=noninteractive
 
-# --- FIX 3: Explicit Repository Activation ---
-# Many Purple OS builds failed because Universe/Multiverse were missing
+# FIX: Enable all repositories for hardware drivers and UI packages
 printf "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse\n" > /etc/apt/sources.list
 printf "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse\n" >> /etc/apt/sources.list
 apt-get update
 
-# Install Core & Google Chrome
+# Install Core Components + Ubiquity (The "Try or Install" Screen)
 apt-get install -y --no-install-recommends \
     linux-image-generic initramfs-tools casper \
     sddm plasma-desktop plasma-nm network-manager \
-    wget curl ca-certificates plymouth plymouth-themes
+    wget curl ca-certificates plymouth plymouth-themes plymouth-label \
+    ubiquity ubiquity-frontend-gtk ubiquity-slideshow-ubuntu
 
-# Purge Linux Bloat
+# PURGE LINUX BLOAT: Replace with Google Apps
 apt-get purge -y kate kwrite khelpcenter evolution thunderbird \
     libreoffice* gnome-software software-properties-gtk \
     simple-scan hplip okular gwenview vlc
 apt-get autoremove -y
 
-# Install Chrome
+# Install Google Chrome
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y ./google-chrome-stable_current_amd64.deb
 rm google-chrome-stable_current_amd64.deb
 
-# --- GOOGLE APP SEEDING ---
-mkdir -p /etc/skel/.local/share/applications
-APPS=("Gmail:https://mail.google.com:mail-send" 
-      "Drive:https://drive.google.com:folder-remote" 
-      "Docs:https://docs.google.com:document-properties" 
-      "YouTube:https://www.youtube.com:youtube")
+# CUSTOM BOOT SPLASH: "Axiom OS" Name
+mkdir -p /usr/share/plymouth/themes/axiom
+cat <<EOT > /usr/share/plymouth/themes/axiom/axiom.plymouth
+[Plymouth Theme]
+Name=Axiom OS
+ModuleName=script
+[script]
+ImageDir=/usr/share/plymouth/themes/axiom
+ScriptFile=/usr/share/plymouth/themes/axiom/axiom.script
+EOT
 
-for app in "\${APPS[@]}"; do
-    NAME=\$(echo \$app | cut -d: -f1)
-    URL=\$(echo \$app | cut -d: -f2,3)
-    ICON=\$(echo \$app | cut -d: -f4)
-    echo -e "[Desktop Entry]\nName=\$NAME\nExec=google-chrome-stable --app=\$URL\nIcon=\$ICON\nType=Application" > /etc/skel/.local/share/applications/\${NAME,,}.desktop
+cat <<EOT > /usr/share/plymouth/themes/axiom/axiom.script
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+label = Image.Text("Axiom OS", 1, 1, 1);
+sprite = Sprite(label);
+sprite.SetX(Window.GetWidth() / 2 - label.GetWidth() / 2);
+sprite.SetY(Window.GetHeight() / 2 - label.GetHeight() / 2);
+EOT
+update-alternatives --install /usr/share/plymouth/themes/default.plymouth default.plymouth /usr/share/plymouth/themes/axiom/axiom.plymouth 100
+echo 1 | update-alternatives --config default.plymouth
+update-initramfs -u
+
+# GOOGLE APP SUITE SEEDING
+mkdir -p /etc/skel/.local/share/applications
+declare -A G_APPS=( ["Gmail"]="https://mail.google.com" ["Docs"]="https://docs.google.com" ["Drive"]="https://drive.google.com" ["YouTube"]="https://www.youtube.com" )
+for NAME in "\${!G_APPS[@]}"; do
+    URL=\${G_APPS[\$NAME]}
+    echo -e "[Desktop Entry]\nName=\$NAME\nExec=google-chrome-stable --app=\$URL\nIcon=google-chrome\nType=Application" > /etc/skel/.local/share/applications/\${NAME,,}.desktop
 done
 
-# UI: Files, Settings, Light Mode, and Shelf
+# RENAMING SYSTEM APPS
 echo -e "[Desktop Entry]\nName=Files\nExec=dolphin\nIcon=system-file-manager\nType=Application" > /etc/skel/.local/share/applications/files.desktop
 echo -e "[Desktop Entry]\nName=Settings\nExec=systemsettings\nIcon=preferences-system\nType=Application" > /etc/skel/.local/share/applications/settings.desktop
 
+# DEFAULT LIGHT MODE & CHROME-STYLE FLOATING SHELF
 mkdir -p /etc/skel/.config
 echo -e "[General]\nColorScheme=Breeze\n[Icons]\nTheme=breeze" > /etc/skel/.config/kdeglobals
 cat <<EOT > /etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc
@@ -80,15 +92,18 @@ Floating=1
 WidgetOrder=org.kde.plasma.kickoff;org.kde.plasma.taskmanager;org.kde.plasma.systemtray;org.kde.plasma.digitalclock
 [Applets][2]
 plugin=org.kde.plasma.taskmanager
-Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,gmail.desktop,docs.desktop,files.desktop,settings.desktop
+Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,gmail.desktop,docs.desktop,drive.desktop,files.desktop,settings.desktop
 EOT
+
+# AUTO-START INSTALLER ON BOOT (For USB Live Mode)
+mkdir -p /etc/skel/.config/autostart
+cp /usr/share/applications/ubiquity.desktop /etc/skel/.config/autostart/
 
 apt-get clean
 EOF
 
-# --- FIX 4: Robust Kernel Extraction ---
-# Don't hardcode version numbers; use wildcards to find the latest image
-echo "--- Stage 3: Packaging ---"
+# --- 4. Robust Packaging ---
+echo "--- Stage 3: Packaging ISO ---"
 sudo umount -l "$ROOT/dev" "$ROOT/run" "$ROOT/proc" "$ROOT/sys" || true
 sudo cp "$ROOT"/boot/vmlinuz-*-generic "$ISO_DIR/live/vmlinuz"
 sudo cp "$ROOT"/boot/initrd.img-*-generic "$ISO_DIR/live/initrd"
