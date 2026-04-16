@@ -7,11 +7,12 @@ ISO_DIR=$(pwd)/axiom_iso
 mkdir -p "$ROOT" "$ISO_DIR/live" output
 export DEBIAN_FRONTEND=noninteractive
 
-# --- 2. Base System Bootstrapping ---
-echo "--- Stage 1: Bootstrapping ---"
-sudo debootstrap --arch amd64 jammy "$ROOT" http://archive.ubuntu.com/ubuntu/
+# --- 2. Stage 1: Fast Bootstrapping (The Fix for the Hang) ---
+echo "--- Stage 1: Bootstrapping via Azure Mirror ---"
+# minbase reduces the initial download size significantly
+sudo debootstrap --variant=minbase --arch amd64 jammy "$ROOT" http://azure.archive.ubuntu.com/ubuntu/
 
-# --- 3. System Customization ---
+# --- 3. Stage 2: Customization ---
 echo "--- Stage 2: Branding & Google Experience ---"
 sudo mount --bind /dev "$ROOT/dev"
 sudo mount --bind /run "$ROOT/run"
@@ -20,20 +21,21 @@ sudo mount -t sysfs sys "$ROOT/sys"
 
 sudo chroot "$ROOT" /bin/bash <<EOF
 export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C
 
-# FIX: Enable all repositories for hardware drivers and UI packages
-printf "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse\n" > /etc/apt/sources.list
-printf "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse\n" >> /etc/apt/sources.list
+# Use Azure mirrors inside chroot for faster package installation
+printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse\n" > /etc/apt/sources.list
+printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse\n" >> /etc/apt/sources.list
 apt-get update
 
-# Install Core Components + Ubiquity (The "Try or Install" Screen)
-apt-get install -y --no-install-recommends \
+# Install Core Components + Try/Install Screen (Anti-Hang Flags Added)
+apt-get install -y --yes -o Dpkg::Options::="--force-confold" --no-install-recommends \
     linux-image-generic initramfs-tools casper \
     sddm plasma-desktop plasma-nm network-manager \
     wget curl ca-certificates plymouth plymouth-themes plymouth-label \
     ubiquity ubiquity-frontend-gtk ubiquity-slideshow-ubuntu
 
-# PURGE LINUX BLOAT: Replace with Google Apps
+# PURGE LINUX BLOAT
 apt-get purge -y kate kwrite khelpcenter evolution thunderbird \
     libreoffice* gnome-software software-properties-gtk \
     simple-scan hplip okular gwenview vlc
@@ -44,7 +46,7 @@ wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.de
 apt-get install -y ./google-chrome-stable_current_amd64.deb
 rm google-chrome-stable_current_amd64.deb
 
-# CUSTOM BOOT SPLASH: "Axiom OS" Name
+# CUSTOM BOOT SPLASH: "Axiom OS"
 mkdir -p /usr/share/plymouth/themes/axiom
 cat <<EOT > /usr/share/plymouth/themes/axiom/axiom.plymouth
 [Plymouth Theme]
@@ -95,14 +97,14 @@ plugin=org.kde.plasma.taskmanager
 Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,gmail.desktop,docs.desktop,drive.desktop,files.desktop,settings.desktop
 EOT
 
-# AUTO-START INSTALLER ON BOOT (For USB Live Mode)
+# AUTO-START INSTALLER ON BOOT
 mkdir -p /etc/skel/.config/autostart
 cp /usr/share/applications/ubiquity.desktop /etc/skel/.config/autostart/
 
 apt-get clean
 EOF
 
-# --- 4. Robust Packaging ---
+# --- 4. Packaging ---
 echo "--- Stage 3: Packaging ISO ---"
 sudo umount -l "$ROOT/dev" "$ROOT/run" "$ROOT/proc" "$ROOT/sys" || true
 sudo cp "$ROOT"/boot/vmlinuz-*-generic "$ISO_DIR/live/vmlinuz"
