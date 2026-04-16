@@ -7,10 +7,10 @@ ISO_DIR=$(pwd)/axiom_iso
 mkdir -p "$ROOT" "$ISO_DIR/live" output
 export DEBIAN_FRONTEND=noninteractive
 
-# --- 2. Stage 1: Fast Bootstrapping (The Fix for the Hang) ---
-echo "--- Stage 1: Bootstrapping via Azure Mirror ---"
-# minbase reduces the initial download size significantly
-sudo debootstrap --variant=minbase --arch amd64 jammy "$ROOT" http://azure.archive.ubuntu.com/ubuntu/
+# --- 2. Stage 1: Fast Bootstrapping ---
+echo "--- Stage 1: Bootstrapping ---"
+# We removed --variant=minbase to ensure basic tools like 'find' and 'wget' are present
+sudo debootstrap --arch amd64 jammy "$ROOT" http://azure.archive.ubuntu.com/ubuntu/
 
 # --- 3. Stage 2: Customization ---
 echo "--- Stage 2: Branding & Google Experience ---"
@@ -23,28 +23,31 @@ sudo chroot "$ROOT" /bin/bash <<EOF
 export DEBIAN_FRONTEND=noninteractive
 export LC_ALL=C
 
-# Use Azure mirrors inside chroot for faster package installation
+# Use Azure mirrors inside chroot
 printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse\n" > /etc/apt/sources.list
 printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse\n" >> /etc/apt/sources.list
 apt-get update
 
-# Install Core Components + Try/Install Screen (Anti-Hang Flags Added)
+# Install Essential Tools first
+apt-get install -y wget ca-certificates
+
+# Install Kernel, Desktop, and Installer
 apt-get install -y --yes -o Dpkg::Options::="--force-confold" --no-install-recommends \
-    linux-image-generic initramfs-tools casper \
+    linux-generic initramfs-tools casper \
     sddm plasma-desktop plasma-nm network-manager \
-    wget curl ca-certificates plymouth plymouth-themes plymouth-label \
+    plymouth plymouth-themes plymouth-label \
     ubiquity ubiquity-frontend-gtk ubiquity-slideshow-ubuntu
+
+# Install Google Chrome
+wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+apt-get install -y ./google-chrome-stable_current_amd64.deb
+rm google-chrome-stable_current_amd64.deb
 
 # PURGE LINUX BLOAT
 apt-get purge -y kate kwrite khelpcenter evolution thunderbird \
     libreoffice* gnome-software software-properties-gtk \
     simple-scan hplip okular gwenview vlc
 apt-get autoremove -y
-
-# Install Google Chrome
-wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-apt-get install -y ./google-chrome-stable_current_amd64.deb
-rm google-chrome-stable_current_amd64.deb
 
 # CUSTOM BOOT SPLASH: "Axiom OS"
 mkdir -p /usr/share/plymouth/themes/axiom
@@ -69,19 +72,17 @@ update-alternatives --install /usr/share/plymouth/themes/default.plymouth defaul
 echo 1 | update-alternatives --config default.plymouth
 update-initramfs -u
 
-# GOOGLE APP SUITE SEEDING
+# GOOGLE APP SUITE & UI RENAMING
 mkdir -p /etc/skel/.local/share/applications
 declare -A G_APPS=( ["Gmail"]="https://mail.google.com" ["Docs"]="https://docs.google.com" ["Drive"]="https://drive.google.com" ["YouTube"]="https://www.youtube.com" )
 for NAME in "\${!G_APPS[@]}"; do
     URL=\${G_APPS[\$NAME]}
     echo -e "[Desktop Entry]\nName=\$NAME\nExec=google-chrome-stable --app=\$URL\nIcon=google-chrome\nType=Application" > /etc/skel/.local/share/applications/\${NAME,,}.desktop
 done
-
-# RENAMING SYSTEM APPS
 echo -e "[Desktop Entry]\nName=Files\nExec=dolphin\nIcon=system-file-manager\nType=Application" > /etc/skel/.local/share/applications/files.desktop
 echo -e "[Desktop Entry]\nName=Settings\nExec=systemsettings\nIcon=preferences-system\nType=Application" > /etc/skel/.local/share/applications/settings.desktop
 
-# DEFAULT LIGHT MODE & CHROME-STYLE FLOATING SHELF
+# DEFAULT LIGHT MODE & SHELF
 mkdir -p /etc/skel/.config
 echo -e "[General]\nColorScheme=Breeze\n[Icons]\nTheme=breeze" > /etc/skel/.config/kdeglobals
 cat <<EOT > /etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc
@@ -97,7 +98,7 @@ plugin=org.kde.plasma.taskmanager
 Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,gmail.desktop,docs.desktop,drive.desktop,files.desktop,settings.desktop
 EOT
 
-# AUTO-START INSTALLER ON BOOT
+# AUTO-START INSTALLER
 mkdir -p /etc/skel/.config/autostart
 cp /usr/share/applications/ubiquity.desktop /etc/skel/.config/autostart/
 
@@ -107,6 +108,7 @@ EOF
 # --- 4. Packaging ---
 echo "--- Stage 3: Packaging ISO ---"
 sudo umount -l "$ROOT/dev" "$ROOT/run" "$ROOT/proc" "$ROOT/sys" || true
+# Now that linux-generic is installed, these files will exist:
 sudo cp "$ROOT"/boot/vmlinuz-*-generic "$ISO_DIR/live/vmlinuz"
 sudo cp "$ROOT"/boot/initrd.img-*-generic "$ISO_DIR/live/initrd"
 sudo mksquashfs "$ROOT" output/AxiomOS.iso -comp xz
