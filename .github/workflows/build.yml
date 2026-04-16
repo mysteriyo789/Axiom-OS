@@ -1,4 +1,4 @@
-name: Build Axiom OS
+name: Build Axiom OS (Master)
 on: 
   push:
     branches: [ main ]
@@ -9,19 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Build Environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y debootstrap squashfs-tools xorriso mtools
-          
-      - name: Run Axiom Build Script
+      - name: Setup Environment
+        run: sudo apt-get update && sudo apt-get install -y debootstrap squashfs-tools xorriso mtools gpg
+      - name: Build
         run: |
           chmod +x scripts/build_axiom.sh
           ./scripts/build_axiom.sh
-          
-      - name: Upload Axiom OS ISO
+      - name: Upload ISO
         uses: actions/upload-artifact@v4
         with:
-          name: AxiomOS-Output
+          name: AxiomOS-Final
           path: output/AxiomOS.iso
