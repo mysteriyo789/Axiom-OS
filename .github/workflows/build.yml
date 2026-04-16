@@ -1,20 +1,27 @@
 name: Build Axiom OS
-on: [push]
+on: 
+  push:
+    branches: [ main ]
+  workflow_dispatch: # This enables the manual "Run workflow" button in Actions
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
+      
       - name: Setup Build Environment
         run: |
           sudo apt-get update
           sudo apt-get install -y debootstrap squashfs-tools xorriso mtools
-      - name: Run Build
+          
+      - name: Run Axiom Build Script
         run: |
           chmod +x scripts/build_axiom.sh
           ./scripts/build_axiom.sh
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+          
+      - name: Upload Axiom OS ISO
+        uses: actions/upload-artifact@v4
         with:
           name: AxiomOS-Output
           path: output/AxiomOS.iso
