@@ -1,149 +1,147 @@
 #!/bin/bash
 set -e
 
-# --- 1. RUNNER OPTIMIZATION ---
-# This clears ~20GB of space to prevent "No space left on device" errors
-echo "--- Optimizing Disk Space for GitHub Runner ---"
-sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell || true
-
+# --- 1. PREPARATION ---
 ROOT=$(pwd)/axiom_rootfs
 ISO_DIR=$(pwd)/axiom_iso
 mkdir -p "$ROOT" "$ISO_DIR/live" output
 export DEBIAN_FRONTEND=noninteractive
 
-# --- 2. BOOTSTRAP ---
-echo "--- Bootstrapping Base System ---"
+echo "--- Bootstrapping Axiom OS (Jammy) ---"
 sudo debootstrap --arch amd64 jammy "$ROOT" http://azure.archive.ubuntu.com/ubuntu/
 
-# --- 3. CHROOT CUSTOMIZATION ---
+# --- 2. MOUNT VIRTUAL FILESYSTEMS ---
 sudo mount --bind /dev "$ROOT/dev"
 sudo mount --bind /run "$ROOT/run"
 sudo mount -t proc proc "$ROOT/proc"
 sudo mount -t sysfs sys "$ROOT/sys"
 
+# --- 3. SYSTEM CUSTOMIZATION (CHROOT) ---
 sudo chroot "$ROOT" /bin/bash <<EOF
 export DEBIAN_FRONTEND=noninteractive
-export LC_ALL=C
 
-# Setup Repositories
+# Repositories
 printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse\n" > /etc/apt/sources.list
 printf "deb http://azure.archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse\n" >> /etc/apt/sources.list
 apt-get update
 
-# Pre-configure SDDM to prevent the installer from hanging on a prompt
-echo "sddm shared/default-x-display-manager select sddm" | debconf-set-selections
+# Install Core UI, Performance, and GUI Tools
+apt-get install -y --no-install-recommends \
+    linux-generic initramfs-tools casper wget ca-certificates \
+    sddm plasma-desktop plasma-nm network-manager \
+    ubiquity ubiquity-frontend-gtk spectacle ark \
+    iio-sensor-proxy power-profiles-daemon yad ImageMagick \
+    plasma-systemmonitor systemsettings zram-config
 
-# Step-wise installation (Better for low-memory environments)
-echo "--- Installing Core Components ---"
-apt-get install -y --no-install-recommends linux-generic initramfs-tools casper wget ca-certificates
-apt-get install -y --no-install-recommends sddm plasma-desktop plasma-nm network-manager
-apt-get install -y --no-install-recommends ubiquity ubiquity-frontend-gtk spectacle ark 
-apt-get install -y --no-install-recommends iio-sensor-proxy power-profiles-daemon libinput-tools
-apt-get install -y --no-install-recommends maliit-framework maliit-keyboard-qt5
-apt-get install -y --no-install-recommends timeshift okular discover plasma-systemmonitor filelight ufw systemsettings
-
-# Install Google Chrome (PWA Engine)
+# Install Google Chrome (The PWA Runtime Engine)
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y ./google-chrome-stable_current_amd64.deb || apt-get install -f -y
 rm google-chrome-stable_current_amd64.deb
 
-# --- AXIOM SYSTEM SCRIPTS ---
+# --- FEATURE: ALWAYS FAST ENGINE (ZRAM) ---
+echo 'ALGO=lz4' >> /etc/default/zramswap
+echo 'PERCENT=60' >> /etc/default/zramswap
 
-# 1. Device Mode Toggle (Adaptive UI logic)
-cat <<'EOT' > /usr/local/bin/axiom-mode-toggle
+# --- FEATURE: UNIVERSAL AXIOM STORE (SEARCHABLE & GLOBAL) ---
+cat <<'EOT' > /usr/local/bin/axiom-store
 #!/bin/bash
-MODE=\$1
-CONF="\$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc"
-# If no mode provided, toggle based on current thickness
-if [ "\$MODE" == "" ]; then
-    if grep -q "Thickness=44" "\$CONF"; then MODE="tablet"; else MODE="laptop"; fi
-fi
+install_app() {
+    NAME=$1; URL=$2
+    ICON_DIR="$HOME/.local/share/icons/axiom"; APP_DIR="$HOME/.local/share/applications"
+    mkdir -p "$APP_DIR" "$ICON_DIR"
+    
+    # Universal High-Res Icon Fetcher (128px)
+    DOMAIN=$(echo "$URL" | awk -F[/] '{print $1"//"$3}')
+    wget -qO "$ICON_DIR/${NAME}.png" "https://www.google.com/s2/favicons?sz=128&domain=$DOMAIN"
+    
+    FILE="$APP_DIR/axiom-${NAME,,}.desktop"
+    echo -e "[Desktop Entry]\nName=$NAME\nExec=google-chrome-stable --app=$URL\nIcon=$ICON_DIR/${NAME}.png\nType=Application\nTerminal=false" > "$FILE"
+    chmod +x "$FILE"
+    
+    # Inject into Center Shelf (Task Manager)
+    CURRENT=$(kreadconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --group Applets --group 2 --key Configuration | grep "launchers=")
+    CLEAN_LIST=$(echo "$CURRENT" | sed 's/launchers=//')
+    kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --group Applets --group 2 --key Configuration --type string "launchers=${CLEAN_LIST},${FILE}"
+    
+    busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshCurrentShell
+    notify-send "Axiom Store" "$NAME added to your Shelf."
+}
+export -f install_app
 
-if [ "\$MODE" == "tablet" ]; then
-    sed -i 's/Thickness=44/Thickness=64/g' "\$CONF"
-    notify-send "Axiom OS" "Adaptive UI: Tablet Mode"
-else
-    sed -i 's/Thickness=64/Thickness=44/g' "\$CONF"
-    notify-send "Axiom OS" "Adaptive UI: Laptop Mode"
-fi
-busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshCurrentShell
-EOT
+# The Main Store Interface
+ACTION=$(yad --title="Axiom Store" --width=750 --height=550 --list --radiolist --search-column=2 \
+    --column="Select" --column="App Name" --column="Category" --column="Action" \
+    FALSE "WhatsApp" "Social" "bash -c 'install_app WhatsApp https://web.whatsapp.com'" \
+    FALSE "ChatGPT" "AI" "bash -c 'install_app ChatGPT https://chat.openai.com'" \
+    FALSE "Spotify" "Music" "bash -c 'install_app Spotify https://open.spotify.com'" \
+    FALSE "YouTube" "Video" "bash -c 'install_app YouTube https://youtube.com'" \
+    FALSE "Gmail" "Work" "bash -c 'install_app Gmail https://mail.google.com'" \
+    FALSE "Canva" "Design" "bash -c 'install_app Canva https://canva.com'" \
+    --button="Install Featured:0" --button="Global Search/URL:2" --button="Close:1")
 
-# 2. Universal Hardware Monitor (Auto-Detect Hinge/Detachment)
-cat <<'EOT' > /usr/local/bin/axiom-hardware-monitor
-#!/bin/bash
-# Monitor libinput for generic tablet-mode switch events
-stdbuf -oL libinput debug-events | while read -r line; do
-    if echo "\$line" | grep -q "tablet-mode state 1"; then
-        /usr/local/bin/axiom-mode-toggle tablet
-    elif echo "\$line" | grep -q "tablet-mode state 0"; then
-        /usr/local/bin/axiom-mode-toggle laptop
+RET=$?
+if [ $RET -eq 2 ]; then
+    # Global PWA Engine: If it's on the web, it's in the Store.
+    USER_INPUT=$(yad --title="Global Axiom Search" --form --field="Enter App Name or URL (e.g. Reddit):")
+    ENTRY=$(echo "$USER_INPUT" | cut -d'|' -f1)
+    if [[ $ENTRY != http* ]]; then
+        TARGET="https://$ENTRY.com"
+        FINAL_NAME=$(echo "$ENTRY" | sed 's/./\u&/')
+    else
+        TARGET=$ENTRY
+        FINAL_NAME=$(echo "$TARGET" | awk -F[/.] '{print $(NF-1)}' | sed 's/./\u&/')
     fi
-done
+    install_app "$FINAL_NAME" "$TARGET"
+fi
 EOT
+chmod +x /usr/local/bin/axiom-store
 
-# 3. Settings Shortcuts
-cat <<EOT > /usr/share/applications/axiom-mode.desktop
+# Create System-wide Launcher for Store
+cat <<EOT > /usr/share/applications/axiom-store.desktop
 [Desktop Entry]
-Name=Device Mode
-Exec=axiom-mode-toggle
-Icon=input-tablet
+Name=Axiom Store
+Exec=axiom-store
+Icon=software-store
 Type=Application
-Categories=Settings;
-X-KDE-Settings-ParentCategory=appearance
 EOT
 
-cat <<EOT > /usr/share/applications/axiom-night.desktop
-[Desktop Entry]
-Name=Night Light
-Exec=systemsettings5 kcm_nightcolor
-Icon=preferences-desktop-display-nightcolor
-Type=Application
-Categories=Settings;
-X-KDE-Settings-ParentCategory=displayandmonitor
+# --- FEATURE: MULTICOLOR LANDSCAPE UI ---
+W_PATH="/usr/share/wallpapers/axiom_multicolor.jpg"
+wget -qO "$W_PATH" "https://images.unsplash.com/photo-1549880181-56a44cf4a9a1?q=80&w=2560"
+
+mkdir -p /etc/skel/.config
+# HUD Shortcut (Alt+Space)
+cat <<EOT >> /etc/skel/.config/kglobalshortcutsrc
+[org.kde.krunner.desktop]
+_launch=Alt+Space,none,Run Command
 EOT
 
-# 4. Axiom Store PWAs
-declare -A PWAS=( ["Calendar"]="https://calendar.google.com" ["Keep"]="https://keep.google.com" ["Meet"]="https://meet.google.com" ["Photos"]="https://photos.google.com" )
-for NAME in "\${!PWAS[@]}"; do
-    URL=\${PWAS[\$NAME]}
-    echo -e "[Desktop Entry]\nName=\$NAME\nExec=google-chrome-stable --app=\$URL\nIcon=google-chrome\nType=Application\nCategories=AxiomStore;" > /usr/share/applications/axiom-\${NAME,,}.desktop
-done
+# Set Automatic Accent Coloring (extracts color from wallpaper)
+kwriteconfig5 --file /etc/skel/.config/kdeglobals --group General --key accentColor --type string "auto"
 
-chmod +x /usr/local/bin/axiom-*
-
-# --- USER DEFAULTS & UI ---
-mkdir -p /etc/skel/.config/autostart
-
-# Maliit keyboard for focus-aware input (Laptop or Tablet mode)
-cat <<EOT > /etc/skel/.config/kwinrc
-[Wayland]
-InputMethod=/usr/share/applications/com.github.maliit.keyboard.desktop
-EOT
-
-# Default Taskbar and Applets
+# Configure the Centered "Shelf" and Clean Desktop
 cat <<EOT > /etc/skel/.config/plasma-org.kde.plasma.desktop-appletsrc
 [Panels][1]
 Alignment=Center
 Location=Bottom
-Thickness=44
-LengthMode=Fill
+Thickness=50
+Floating=true
 [Applets][2]
 plugin=org.kde.plasma.taskmanager
-Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,gmail.desktop,docs.desktop,drive.desktop,files.desktop,settings.desktop,org.kde.plasma-systemmonitor.desktop,org.kde.discover.desktop
+Configuration=showOnlyCurrentDesktop:true;launchers=google-chrome.desktop,axiom-store.desktop,settings.desktop
+[Containments][1]
+plugin=org.kde.desktopcontainment
+Wallpaper=org.kde.image
+WallpaperConfiguration=axiom_multicolor.jpg
 EOT
 
-# Register Background Monitor
-echo -e "[Desktop Entry]\nExec=axiom-hardware-monitor\nType=Application\nName=Axiom Monitor" > /etc/skel/.config/autostart/axiom-monitor.desktop
-
-# Final Cleanup to keep SquashFS size low
-apt-get autoremove -y
-apt-get clean
+# --- CLEANUP ---
+apt-get autoremove -y && apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 
-# --- 4. PACKAGING ---
-echo "--- Compressing File System (SquashFS) ---"
+# --- 4. ISO COMPILATION ---
+echo "--- Compiling Axiom OS ISO ---"
 sudo umount -l "$ROOT/dev" "$ROOT/run" "$ROOT/proc" "$ROOT/sys" || true
 sudo cp "$ROOT"/boot/vmlinuz-*-generic "$ISO_DIR/live/vmlinuz"
 sudo cp "$ROOT"/boot/initrd.img-*-generic "$ISO_DIR/live/initrd"
