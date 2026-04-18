@@ -1,32 +1,26 @@
 name: Build Axiom OS (Master)
-
 on:
   push:
     branches: [ "main" ]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
       - name: Maximize Build Space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
           sudo apt-get clean
-
       - name: Install Host Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y debootstrap squashfs-tools xorriso wget ca-certificates
-
       - name: Execute Axiom Build
         run: |
           chmod +x scripts/build_axiom.sh
           sudo ./scripts/build_axiom.sh
-
       - name: Upload Axiom ISO
         uses: actions/upload-artifact@v4
         with:
