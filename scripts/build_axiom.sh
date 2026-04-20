@@ -20,43 +20,49 @@ sudo mount -t sysfs sysfs "$ROOT/sys"
 sudo chroot "$ROOT" /bin/bash <<'EOF'
 export DEBIAN_FRONTEND=noninteractive
 
-# Optimization: Shrink footprint
+# CRITICAL FIX: Enable Universe and Multiverse repositories
+cat <<EOT > /etc/apt/sources.list
+deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+deb http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
+EOT
+
+# Optimization: Skip docs
 echo 'path-exclude /usr/share/doc/*' > /etc/dpkg/dpkg.cfg.d/01_nodoc
 echo 'path-exclude /usr/share/man/*' >> /etc/dpkg/dpkg.cfg.d/01_nodoc
 
 apt-get update
-apt-get install -y --no-install-recommends \
-    linux-image-generic initramfs-tools casper wget curl ca-certificates \
-    sddm plasma-desktop-data plasma-workspace plasma-nm network-manager \
-    yad zram-config maliit-keyboard iio-sensor-proxy
 
-# Install the Axiom Runtime Engine
+echo "--- Installing Tools & Kernel ---"
+# We install wget and gnupg first so the rest of the script can use them
+apt-get install -y --no-install-recommends wget ca-certificates gnupg2
+apt-get install -y --no-install-recommends linux-image-generic initramfs-tools casper
+
+echo "--- Installing Axiom UI Components ---"
+apt-get install -y --no-install-recommends \
+    sddm plasma-desktop-data plasma-workspace plasma-nm \
+    network-manager kde-cli-tools ubiquity ubiquity-frontend-gtk \
+    yad imagemagick zram-config maliit-keyboard qtwayland5 iio-sensor-proxy
+
+echo "--- Integrating App Hub Runtime ---"
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y ./google-chrome-stable_current_amd64.deb || apt-get install -f -y
 rm google-chrome-stable_current_amd64.deb
 
-# --- AXIOM APP HUB: INVISIBLE INTEGRATION ---
+# --- AXIOM CUSTOMIZATIONS ---
+mkdir -p /usr/local/bin
 
-# 1. Create the App Hub PWA Wrapper
 cat <<'HUB_EOT' > /usr/local/bin/axiom-app-hub
 #!/bin/bash
-# Launching the App Hub as a clean, native-feel standalone app
-# (This points to the internal Axiom-PWA gateway URL)
-google-chrome --app="https://apphub.axiom-os.co" \
-              --class="AppHub" \
-              --no-first-run \
-              --enable-features=WebUIDarkMode,RunAllFlashInAllowMode \
-              --force-dark-mode \
-              --user-data-dir="/home/\$USER/.config/axiom-hub"
+google-chrome --app="https://apphub.axiom-os.co" --class="AppHub" --no-first-run --force-dark-mode
 HUB_EOT
 chmod +x /usr/local/bin/axiom-app-hub
 
-# 2. Updated System Menu Registration (Strictly "Software Store" Branding)
+mkdir -p /usr/share/applications
 cat <<ENTRY_EOT > /usr/share/applications/app-hub.desktop
 [Desktop Entry]
 Name=App Hub
 GenericName=Software Store
-Comment=Access all software optimized for Axiom OS
 Exec=/usr/local/bin/axiom-app-hub
 Icon=system-software-install
 Type=Application
@@ -64,12 +70,9 @@ Categories=System;Network;
 StartupWMClass=AppHub
 ENTRY_EOT
 
-# 3. Axiom Setup (Simplified Welcome Message)
 cat <<'MODE_EOT' > /usr/local/bin/axiom-mode-toggle
 #!/bin/bash
-MSG="<b>Welcome to Axiom OS.</b>\n\nYour new, optimized computer experience is ready.\nChoose your preferred interface style:"
-MODE=$(yad --title="Axiom OS" --text="$MSG" --button="Laptop Mode:0" --button="Tablet Mode:2" --width=450)
-
+MODE=$(yad --title="Axiom OS" --text="Select Interface Style" --button="Laptop:0" --button="Tablet:2" --width=400)
 if [ $? -eq 0 ]; then
     kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key Thickness 40
 else
@@ -79,10 +82,6 @@ busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshC
 MODE_EOT
 chmod +x /usr/local/bin/axiom-mode-toggle
 
-# 4. Final Performance (Invisible and Fast)
-echo 'ALGO=lz4' > /etc/default/zramswap
-echo 'PERCENT=60' >> /etc/default/zramswap
-
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
@@ -90,6 +89,7 @@ EOF
 # --- 4. KERNEL RECOVERY ---
 VMLINUZ=$(find "$ROOT/boot" -name "vmlinuz-*-generic" | head -n 1)
 INITRD=$(find "$ROOT/boot" -name "initrd.img-*-generic" | head -n 1)
+
 sudo cp -v "$VMLINUZ" "$ISO_DIR/live/vmlinuz"
 sudo cp -v "$INITRD" "$ISO_DIR/live/initrd"
 
