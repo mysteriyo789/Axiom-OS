@@ -17,11 +17,10 @@ sudo mount -t proc proc "$ROOT/proc"
 sudo mount -t sysfs sysfs "$ROOT/sys"
 
 # --- 3. CHROOT LOGIC ---
-# Using a unique, quoted delimiter to prevent variable expansion and nesting issues
 sudo chroot "$ROOT" /bin/bash <<'MAIN_CHROOT_EOF'
 export DEBIAN_FRONTEND=noninteractive
 
-# Repositories
+# Repositories (Universe/Multiverse enabled for Drivers & Waydroid)
 cat <<REPOS_EOT > /etc/apt/sources.list
 deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
 deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
@@ -29,20 +28,29 @@ deb http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe mu
 REPOS_EOT
 
 apt-get update
+
+# Core Infrastructure & Pro Utilities
 apt-get install -y --no-install-recommends \
     wget ca-certificates gnupg2 linux-image-generic initramfs-tools casper \
-    wireguard-tools rofi xclip bubblewrap ffmpeg
+    wireguard-tools rofi xclip bubblewrap ffmpeg curl \
+    btrfs-progs snapper hw-probe fwupd kdeconnect lxc
 
+# UI Components
 apt-get install -y --no-install-recommends \
     sddm plasma-desktop-data plasma-workspace plasma-nm \
     network-manager kde-cli-tools ubiquity ubiquity-frontend-gtk \
     yad imagemagick zram-config maliit-keyboard qtwayland5 iio-sensor-proxy \
     papirus-icon-theme dolphin
 
-# Install Chrome
+# Install Chrome (Axiom Runtime)
 wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
 apt-get install -y ./google-chrome-stable_current_amd64.deb || apt-get install -f -y
 rm google-chrome-stable_current_amd64.deb
+
+# --- ANDROID BRIDGE (Waydroid) ---
+curl -fsSL https://repo.waydro.id/waydroid.gpg | gpg --dearmor > /usr/share/keyrings/waydroid.gpg
+echo "deb [signed-by=/usr/share/keyrings/waydroid.gpg] https://repo.waydro.id/ jammy main" > /etc/apt/sources.list.d/waydroid.list
+apt-get update && apt-get install -y waydroid
 
 # --- AXIOM CUSTOMIZATIONS ---
 mkdir -p /usr/local/bin /usr/share/applications /etc/skel/.config
@@ -71,7 +79,7 @@ HUB_SVG
 
 cp /etc/axiom/ui/branding/axiom-logo.svg /usr/share/icons/hicolor/scalable/apps/axiom-launcher.svg
 
-# 2. Pro Utilities Core
+# 2. Pro Utilities & Hardware Fixer
 if [ ! -f /etc/wireguard/axiom0.key ]; then
     wg genkey | tee /etc/wireguard/axiom0.key | wg pubkey | tee /etc/wireguard/axiom0.pub > /dev/null
 fi
@@ -79,14 +87,26 @@ fi
 wget -q https://github.com/erebe/greenclip/releases/download/v4.2/greenclip -O /usr/local/bin/greenclip
 chmod +x /usr/local/bin/greenclip
 
-cat <<'VOID_SCRIPT' > /usr/local/bin/axiom-void
+cat <<'VOID_EOT' > /usr/local/bin/axiom-void
 #!/bin/bash
 bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /bin /bin --ro-bind /etc /etc \
       --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home --unshare-all --share-net --die-with-parent "$@"
-VOID_SCRIPT
+VOID_EOT
 chmod +x /usr/local/bin/axiom-void
 
-# 3. Desktop Entries
+cat <<'HW_EOT' > /usr/local/bin/axiom-hw-fix
+#!/bin/bash
+echo "Probing hardware for compatibility..."
+hw-probe -all -upload
+fwupdmgr get-updates && fwupdmgr update
+HW_EOT
+chmod +x /usr/local/bin/axiom-hw-fix
+
+# 3. Ecosystem & Autostart (Continuity)
+mkdir -p /etc/skel/.config/autostart
+cp /usr/share/applications/org.kde.kdeconnect.daemon.desktop /etc/skel/.config/autostart/
+
+# 4. Desktop Entries
 cat <<'FILES_EOT' > /usr/share/applications/axiom-files.desktop
 [Desktop Entry]
 Name=Files
@@ -97,16 +117,7 @@ Categories=System;FileTools;
 GenericName=File Browser
 FILES_EOT
 
-cat <<'SETTINGS_EOT' > /usr/share/applications/axiom-settings.desktop
-[Desktop Entry]
-Name=Settings
-Exec=systemsettings
-Icon=preferences-system
-Type=Application
-Categories=Settings;
-SETTINGS_EOT
-
-# 4. Media Transcoder
+# 5. Media Transcoder Action
 mkdir -p /etc/skel/.local/share/nemo/actions
 cat <<'NEMO_EOT' > /etc/skel/.local/share/nemo/actions/transcode_mp4.nemo_action
 [Nemo Action]
@@ -117,7 +128,7 @@ Selection=s
 Extensions=mkv;avi;mov;webm;
 NEMO_EOT
 
-# 5. Theme & UI
+# 6. Theme & UI
 cat <<'KDE_EOT' > /etc/skel/.config/kdeglobals
 [Icons]
 Theme=Papirus-Dark
@@ -125,16 +136,8 @@ Theme=Papirus-Dark
 ColorScheme=BreezeDark
 KDE_EOT
 
-cat <<'DOLPHIN_EOT' > /etc/skel/.config/dolphinrc
-[General]
-ShowFullPath=false
-ViewMode=1
-[PlacesPanel]
-IconSize=32
-DOLPHIN_EOT
-
-# 6. Manual UI Toggle
-cat <<'MODE_SCRIPT' > /usr/local/bin/axiom-mode-toggle
+# 7. Manual UI Toggle
+cat <<'MODE_EOT' > /usr/local/bin/axiom-mode-toggle
 #!/bin/bash
 MSG="<b>Interface Selection</b>"
 MODE=$(yad --title="Settings" --text="$MSG" --button="Laptop Mode:0" --button="Tablet Mode:2" --width=350)
@@ -146,7 +149,7 @@ else
     kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key Thickness 30
 fi
 busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshCurrentShell
-MODE_SCRIPT
+MODE_EOT
 chmod +x /usr/local/bin/axiom-mode-toggle
 
 echo -e "[TabletMode]\nTabletMode=never" > /etc/skel/.config/kwinrc
