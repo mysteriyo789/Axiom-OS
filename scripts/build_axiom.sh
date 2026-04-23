@@ -1,6 +1,4 @@
 #!/bin/bash
-# Axiom OS Master Build Script
-# Version: 1.3.0 (Infrastructure + Identity + Utilities)
 set -e
 
 # --- 1. SETUP ---
@@ -30,19 +28,29 @@ deb http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe mu
 EOT
 
 apt-get update
+# Added core dependencies for the utility suite here
 apt-get install -y --no-install-recommends \
     wget ca-certificates gnupg2 linux-image-generic initramfs-tools casper \
+    wireguard-tools rofi xclip bubblewrap ffmpeg
+
+# Install UI and the Vibrant Icon Theme
+apt-get install -y --no-install-recommends \
     sddm plasma-desktop-data plasma-workspace plasma-nm \
     network-manager kde-cli-tools ubiquity ubiquity-frontend-gtk \
     yad imagemagick zram-config maliit-keyboard qtwayland5 iio-sensor-proxy \
-    papirus-icon-theme dolphin wireguard-tools rofi xclip bubblewrap ffmpeg
+    papirus-icon-theme dolphin
 
-# --- AXIOM IDENTITY SYSTEM ("The Silent Feather") ---
-LOGO_DIR="/etc/axiom/ui/branding"
-ICON_DIR="/usr/share/icons/hicolor/scalable/apps"
-mkdir -p "$LOGO_DIR" "$ICON_DIR"
+# Install the Axiom Runtime Engine (Chrome)
+wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+apt-get install -y ./google-chrome-stable_current_amd64.deb || apt-get install -f -y
+rm google-chrome-stable_current_amd64.deb
 
-cat <<'SVG_EOT' > "$LOGO_DIR/axiom-logo.svg"
+# --- AXIOM CUSTOMIZATIONS ---
+mkdir -p /usr/local/bin /usr/share/applications /etc/skel/.config
+mkdir -p /etc/axiom/ui/branding /usr/share/icons/hicolor/scalable/apps
+
+# 1. Identity System: The Silent Feather & App Hub Prism
+cat <<'SVG_EOT' > /etc/axiom/ui/branding/axiom-logo.svg
 <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <mask id="AxiomFeatherMask">
@@ -55,21 +63,26 @@ cat <<'SVG_EOT' > "$LOGO_DIR/axiom-logo.svg"
 </svg>
 SVG_EOT
 
-cat <<'SVG_EOT' > "$ICON_DIR/axiom-apphub.svg"
+cat <<'SVG_EOT' > /usr/share/icons/hicolor/scalable/apps/axiom-apphub.svg
 <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
   <path d="M50 15 L85 75 L50 90 L15 75 Z" fill="white"/>
   <path d="M50 15 L50 90" stroke="#1A1B26" stroke-width="2"/>
 </svg>
 SVG_EOT
 
-cp "$LOGO_DIR/axiom-logo.svg" "$ICON_DIR/axiom-launcher.svg"
+cp /etc/axiom/ui/branding/axiom-logo.svg /usr/share/icons/hicolor/scalable/apps/axiom-launcher.svg
 
-# --- AXIOM PRO UTILITIES ---
-# 1. Infinite Clipboard
+# 2. Pro Utilities Core
+# 2.1 Persistence Tunnel (WireGuard Config Placeholder)
+if [ ! -f /etc/wireguard/axiom0.key ]; then
+    wg genkey | tee /etc/wireguard/axiom0.key | wg pubkey | tee /etc/wireguard/axiom0.pub > /dev/null
+fi
+
+# 2.2 Infinite Clipboard (Greenclip)
 wget -q https://github.com/erebe/greenclip/releases/download/v4.2/greenclip -O /usr/local/bin/greenclip
 chmod +x /usr/local/bin/greenclip
 
-# 2. Execution in Void
+# 2.3 Execution in Void (Bubblewrap)
 cat <<'VOID_EOT' > /usr/local/bin/axiom-void
 #!/bin/bash
 bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /bin /bin --ro-bind /etc /etc \
@@ -77,8 +90,38 @@ bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /bin /bin --ro-bind /etc
 VOID_EOT
 chmod +x /usr/local/bin/axiom-void
 
-# --- DESKTOP CONFIGURATION ---
-mkdir -p /etc/skel/.config
+# 3. Branding Desktop Entries: Files & Settings
+cat <<EOT > /usr/share/applications/axiom-files.desktop
+[Desktop Entry]
+Name=Files
+Exec=dolphin %u
+Icon=system-file-manager
+Type=Application
+Categories=System;FileTools;
+GenericName=File Browser
+EOT
+
+cat <<EOT > /usr/share/applications/axiom-settings.desktop
+[Desktop Entry]
+Name=Settings
+Exec=systemsettings
+Icon=preferences-system
+Type=Application
+Categories=Settings;
+EOT
+
+# 4. Direct Media Transcoder (Context Menus)
+mkdir -p /etc/skel/.local/share/nemo/actions
+cat <<EOF > /etc/skel/.local/share/nemo/actions/transcode_mp4.nemo_action
+[Nemo Action]
+Active=true
+Name=Transcode to MP4 (Axiom Core)
+Exec=ffmpeg -i %f -c:v libx264 -crf 23 -c:a aac -b:a 192k %f.mp4
+Selection=s
+Extensions=mkv;avi;mov;webm;
+EOF
+
+# 5. Theme & UI Configuration
 cat <<ICON_EOT > /etc/skel/.config/kdeglobals
 [Icons]
 Theme=Papirus-Dark
@@ -86,19 +129,32 @@ Theme=Papirus-Dark
 ColorScheme=BreezeDark
 ICON_EOT
 
-# UI Toggle Script
+cat <<DOLPHIN_EOT > /etc/skel/.config/dolphinrc
+[General]
+ShowFullPath=false
+ViewMode=1
+[PlacesPanel]
+IconSize=32
+DOLPHIN_EOT
+
+# 6. Manual UI Toggle
 cat <<'MODE_EOT' > /usr/local/bin/axiom-mode-toggle
 #!/bin/bash
 MSG="<b>Interface Selection</b>"
 MODE=$(yad --title="Settings" --text="$MSG" --button="Laptop Mode:0" --button="Tablet Mode:2" --width=350)
+
 if [ $? -eq 0 ]; then
     kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key location "bottom"
+    kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key Thickness 40
 else
     kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key location "top"
+    kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key Thickness 30
 fi
 busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshCurrentShell
 MODE_EOT
 chmod +x /usr/local/bin/axiom-mode-toggle
+
+echo -e "[TabletMode]\nTabletMode=never" > /etc/skel/.config/kwinrc
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -111,5 +167,3 @@ sudo cp -v "$VMLINUZ" "$ISO_DIR/live/vmlinuz"
 sudo cp -v "$INITRD" "$ISO_DIR/live/initrd"
 sudo umount -l "$ROOT/sys" "$ROOT/proc" "$ROOT/run" "$ROOT/dev"
 sudo mksquashfs "$ROOT" output/AxiomOS.iso -comp gzip -no-progress
-
-echo "--- Build Complete: output/AxiomOS.iso generated ---"
