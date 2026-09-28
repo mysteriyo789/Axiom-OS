@@ -33,7 +33,8 @@ apt-get update
 apt-get install -y --no-install-recommends \
     wget ca-certificates gnupg2 linux-image-generic initramfs-tools casper \
     wireguard-tools rofi xclip bubblewrap ffmpeg curl \
-    btrfs-progs snapper hw-probe fwupd kdeconnect lxc
+    btrfs-progs snapper hw-probe fwupd kdeconnect lxc \
+    xorriso grub-pc-bin grub-efi-amd64-bin
 
 # UI Components
 apt-get install -y --no-install-recommends \
@@ -158,10 +159,28 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 MAIN_CHROOT_EOF
 
-# --- 4. PACKAGING ---
+# --- 4. PACKAGING (UEFI + BIOS Compatible) ---
 VMLINUZ=$(find "$ROOT/boot" -name "vmlinuz-*-generic" | head -n 1)
 INITRD=$(find "$ROOT/boot" -name "initrd.img-*-generic" | head -n 1)
+
 sudo cp -v "$VMLINUZ" "$ISO_DIR/live/vmlinuz"
 sudo cp -v "$INITRD" "$ISO_DIR/live/initrd"
-sudo umount -l "$ROOT/sys" "$ROOT/proc" "$ROOT/run" "$ROOT/dev"
-sudo mksquashfs "$ROOT" output/AxiomOS.iso -comp gzip -no-progress
+
+sudo umount -l "$ROOT/sys" "$ROOT/proc" "$ROOT/run" "$ROOT/dev" || true
+sudo mksquashfs "$ROOT" "$ISO_DIR/live/filesystem.squashfs" -comp gzip -no-progress
+
+mkdir -p "$ISO_DIR/boot/grub"
+cat <<'GRUB_EOT' > "$ISO_DIR/boot/grub/grub.cfg"
+set default=0
+set timeout=5
+
+menuentry "Axiom OS (Live x64 UEFI/BIOS)" {
+    linux /live/vmlinuz boot=casper quiet splash ---
+    initrd /live/initrd
+}
+GRUB_EOT
+
+sudo apt-get install -y xorriso grub-pc-bin grub-efi-amd64-bin
+grub-mkrescue -o output/AxiomOS.iso "$ISO_DIR"
+
+echo "--- UEFI Build Complete: output/AxiomOS.iso generated ---"
