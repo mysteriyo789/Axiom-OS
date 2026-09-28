@@ -34,7 +34,7 @@ apt-get install -y --no-install-recommends \
     wget ca-certificates gnupg2 linux-image-generic initramfs-tools casper \
     wireguard-tools rofi xclip bubblewrap ffmpeg curl \
     btrfs-progs snapper hw-probe fwupd kdeconnect lxc \
-    xorriso grub-pc-bin grub-efi-amd64-bin
+    xorriso grub-pc-bin grub-efi-amd64-bin mtools dosfstools
 
 # UI Components
 apt-get install -y --no-install-recommends \
@@ -180,7 +180,8 @@ menuentry "Axiom OS (Live x64 UEFI/BIOS)" {
 }
 GRUB_EOT
 
-sudo apt-get install -y xorriso grub-pc-bin grub-efi-amd64-bin
+# Installed mtools and dosfstools to provide mformat for grub-mkrescue
+sudo apt-get install -y xorriso grub-pc-bin grub-efi-amd64-bin mtools dosfstools
 grub-mkrescue -o output/AxiomOS.iso "$ISO_DIR"
 
 echo "--- UEFI Build Complete: output/AxiomOS.iso generated ---"
