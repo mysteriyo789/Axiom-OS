@@ -169,18 +169,18 @@ sudo cp -v "$INITRD" "$ISO_DIR/live/initrd"
 sudo umount -l "$ROOT/sys" "$ROOT/proc" "$ROOT/run" "$ROOT/dev" || true
 sudo mksquashfs "$ROOT" "$ISO_DIR/live/filesystem.squashfs" -comp gzip -no-progress
 
+# Auto-boot GRUB menu + Ventoy casper boot flags
 mkdir -p "$ISO_DIR/boot/grub"
 cat <<'GRUB_EOT' > "$ISO_DIR/boot/grub/grub.cfg"
 set default=0
-set timeout=5
+set timeout=0
 
 menuentry "Axiom OS (Live x64 UEFI/BIOS)" {
-    linux /live/vmlinuz boot=casper quiet splash ---
+    linux /live/vmlinuz boot=casper quiet splash toram ---
     initrd /live/initrd
 }
 GRUB_EOT
 
-# Installed mtools and dosfstools to provide mformat for grub-mkrescue
 sudo apt-get install -y xorriso grub-pc-bin grub-efi-amd64-bin mtools dosfstools
 grub-mkrescue -o output/AxiomOS.iso "$ISO_DIR"
 
