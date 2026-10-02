@@ -159,7 +159,7 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 MAIN_CHROOT_EOF
 
-# --- 4. PACKAGING (UEFI + BIOS Compatible) ---
+# --- 4. PACKAGING (Ventoy & UEFI Compatible) ---
 VMLINUZ=$(find "$ROOT/boot" -name "vmlinuz-*-generic" | head -n 1)
 INITRD=$(find "$ROOT/boot" -name "initrd.img-*-generic" | head -n 1)
 
@@ -169,14 +169,14 @@ sudo cp -v "$INITRD" "$ISO_DIR/live/initrd"
 sudo umount -l "$ROOT/sys" "$ROOT/proc" "$ROOT/run" "$ROOT/dev" || true
 sudo mksquashfs "$ROOT" "$ISO_DIR/live/filesystem.squashfs" -comp gzip -no-progress
 
-# Auto-boot GRUB menu + Ventoy casper boot flags
+# Auto-boot GRUB configuration compatible with Ventoy ISO mapping
 mkdir -p "$ISO_DIR/boot/grub"
 cat <<'GRUB_EOT' > "$ISO_DIR/boot/grub/grub.cfg"
 set default=0
 set timeout=0
 
 menuentry "Axiom OS (Live x64 UEFI/BIOS)" {
-    linux /live/vmlinuz boot=casper quiet splash toram ---
+    linux /live/vmlinuz boot=casper iso-scan/filename=${iso_path} ignore_uuid quiet splash toram ---
     initrd /live/initrd
 }
 GRUB_EOT
