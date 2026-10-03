@@ -53,6 +53,20 @@ curl -fsSL https://repo.waydro.id/waydroid.gpg | gpg --dearmor > /usr/share/keyr
 echo "deb [signed-by=/usr/share/keyrings/waydroid.gpg] https://repo.waydro.id/ jammy main" > /etc/apt/sources.list.d/waydroid.list
 apt-get update && apt-get install -y waydroid
 
+# --- VENTOY & LOOPBACK FIX FOR CASPER ---
+# Force loop device and overlay filesystem drivers into early boot RAM disk
+cat <<'MODULES_EOT' >> /etc/initramfs-tools/modules
+loop
+overlay
+iso9660
+squashfs
+uasp
+usb_storage
+MODULES_EOT
+
+# Rebuild initramfs to incorporate kernel modules
+update-initramfs -u -k all
+
 # --- AXIOM CUSTOMIZATIONS ---
 mkdir -p /usr/local/bin /usr/share/applications /etc/skel/.config
 mkdir -p /etc/axiom/ui/branding /usr/share/icons/hicolor/scalable/apps
@@ -159,7 +173,7 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 MAIN_CHROOT_EOF
 
-# --- 4. PACKAGING (Ventoy & UEFI Compatible) ---
+# --- 4. PACKAGING ---
 VMLINUZ=$(find "$ROOT/boot" -name "vmlinuz-*-generic" | head -n 1)
 INITRD=$(find "$ROOT/boot" -name "initrd.img-*-generic" | head -n 1)
 
@@ -169,7 +183,7 @@ sudo cp -v "$INITRD" "$ISO_DIR/live/initrd"
 sudo umount -l "$ROOT/sys" "$ROOT/proc" "$ROOT/run" "$ROOT/dev" || true
 sudo mksquashfs "$ROOT" "$ISO_DIR/live/filesystem.squashfs" -comp gzip -no-progress
 
-# Auto-boot GRUB configuration compatible with Ventoy ISO mapping
+# Auto-boot GRUB configuration
 mkdir -p "$ISO_DIR/boot/grub"
 cat <<'GRUB_EOT' > "$ISO_DIR/boot/grub/grub.cfg"
 set default=0
