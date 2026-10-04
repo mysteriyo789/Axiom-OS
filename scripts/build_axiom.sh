@@ -1,193 +1,100 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -xeu pipefail
 
-# --- 1. SETUP ---
-ROOT=$(pwd)/axiom_rootfs
-ISO_DIR=$(pwd)/axiom_iso
-mkdir -p "$ROOT" "$ISO_DIR/live" output
-export DEBIAN_FRONTEND=noninteractive
+# --------------------------------------------------
+# Environment Variables & Paths
+# --------------------------------------------------
+WORK_DIR="$(pwd)/build_work"
+CHROOT_DIR="${WORK_DIR}/chroot"
+ISO_DIR="${WORK_DIR}/iso"
+OUTPUT_DIR="$(pwd)/output"
+RELEASE="jammy"
+ARCH="amd64"
 
-echo "--- Phase 1: Minimal Bootstrap ---"
-sudo debootstrap --arch amd64 --variant=minbase jammy "$ROOT" http://archive.ubuntu.com/ubuntu/
+mkdir -p "${CHROOT_DIR}" "${ISO_DIR}" "${OUTPUT_DIR}"
 
-# --- 2. MOUNTING ---
-sudo mount --bind /dev "$ROOT/dev"
-sudo mount --bind /run "$ROOT/run"
-sudo mount -t proc proc "$ROOT/proc"
-sudo mount -t sysfs sysfs "$ROOT/sys"
+# --------------------------------------------------
+# 1. Bootstrap Minimal Ubuntu System
+# --------------------------------------------------
+if [ ! -f "${CHROOT_DIR}/usr/bin/apt-get" ]; then
+    debootstrap --arch="${ARCH}" --variant=minbase "${RELEASE}" "${CHROOT_DIR}" http://archive.ubuntu.com/ubuntu/
+fi
 
-# --- 3. CHROOT LOGIC ---
-sudo chroot "$ROOT" /bin/bash <<'MAIN_CHROOT_EOF'
-export DEBIAN_FRONTEND=noninteractive
+# Mount essential virtual filesystems for chroot execution
+mount -t proc /proc "${CHROOT_DIR}/proc"
+mount -t sysfs /sys "${CHROOT_DIR}/sys"
+mount --bind /dev "${CHROOT_DIR}/dev"
+mount --bind /dev/pts "${CHROOT_DIR}/dev/pts"
 
-# Repositories (Universe/Multiverse enabled for Drivers & Waydroid)
-cat <<REPOS_EOT > /etc/apt/sources.list
+cleanup() {
+    umount -l "${CHROOT_DIR}/dev/pts" || true
+    umount -l "${CHROOT_DIR}/dev" || true
+    umount -l "${CHROOT_DIR}/sys" || true
+    umount -l "${CHROOT_DIR}/proc" || true
+}
+trap cleanup EXIT
+
+# --------------------------------------------------
+# 2. Configure Repositories & Install Core Packages
+# --------------------------------------------------
+cat <<'EOF' > "${CHROOT_DIR}/etc/apt/sources.list"
 deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
 deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
 deb http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse
-REPOS_EOT
+EOF
 
+chroot "${CHROOT_DIR}" /bin/bash -s <<'CHROOT_ENV'
+export DEBIAN_FRONTEND=noninteractive
 apt-get update
-
-# Core Infrastructure & Pro Utilities
 apt-get install -y --no-install-recommends \
-    wget ca-certificates gnupg2 linux-image-generic initramfs-tools casper \
-    wireguard-tools rofi xclip bubblewrap ffmpeg curl \
-    btrfs-progs snapper hw-probe fwupd kdeconnect lxc \
-    xorriso grub-pc-bin grub-efi-amd64-bin mtools dosfstools
+    linux-image-generic \
+    live-boot \
+    casper \
+    initramfs-tools \
+    systemd-sysv \
+    network-manager \
+    kde-plasma-desktop \
+    wireguard \
+    btrfs-progs \
+    snapper \
+    sudo
 
-# UI Components
-apt-get install -y --no-install-recommends \
-    sddm plasma-desktop-data plasma-workspace plasma-nm \
-    network-manager kde-cli-tools ubiquity ubiquity-frontend-gtk \
-    yad imagemagick zram-config maliit-keyboard qtwayland5 iio-sensor-proxy \
-    papirus-icon-theme dolphin
-
-# Install Chrome (Axiom Runtime)
-wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-apt-get install -y ./google-chrome-stable_current_amd64.deb || apt-get install -f -y
-rm google-chrome-stable_current_amd64.deb
-
-# --- ANDROID BRIDGE (Waydroid) ---
-curl -fsSL https://repo.waydro.id/waydroid.gpg | gpg --dearmor > /usr/share/keyrings/waydroid.gpg
-echo "deb [signed-by=/usr/share/keyrings/waydroid.gpg] https://repo.waydro.id/ jammy main" > /etc/apt/sources.list.d/waydroid.list
-apt-get update && apt-get install -y waydroid
-
-# --- VENTOY & LOOPBACK FIX FOR CASPER ---
-# Force loop device and overlay filesystem drivers into early boot RAM disk
+# Add early kernel modules to fix Ventoy loopback mounting
 cat <<'MODULES_EOT' >> /etc/initramfs-tools/modules
 loop
 overlay
 iso9660
 squashfs
-uasp
+uas
 usb_storage
 MODULES_EOT
 
-# Rebuild initramfs to incorporate kernel modules
+# Rebuild initramfs with loopback drivers embedded
 update-initramfs -u -k all
+CHROOT_ENV
 
-# --- AXIOM CUSTOMIZATIONS ---
-mkdir -p /usr/local/bin /usr/share/applications /etc/skel/.config
-mkdir -p /etc/axiom/ui/branding /usr/share/icons/hicolor/scalable/apps
+# --------------------------------------------------
+# 3. Assemble ISO Structure
+# --------------------------------------------------
+mkdir -p "${ISO_DIR}/live"
+mkdir -p "${ISO_DIR}/boot/grub"
 
-# 1. Identity System
-cat <<'LOGO_SVG' > /etc/axiom/ui/branding/axiom-logo.svg
-<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <mask id="AxiomFeatherMask">
-      <circle cx="50" cy="50" r="48" fill="white"/>
-      <path d="M52 82 C 55 70 52 58 48 48 C 45 40 46 30 50 20 L 48 18 C 42 28 41 40 44 50 C 47 60 48 72 45 84 Z" fill="black"/>
-      <path d="M48 18 C 30 25 32 45 35 60 C 37 75 32 82 45 84 Z" fill="black"/>
-    </mask>
-  </defs>
-  <circle cx="50" cy="50" r="48" fill="white" mask="url(#AxiomFeatherMask)"/>
-</svg>
-LOGO_SVG
+# Copy Kernel and initrd into ISO structure
+cp "${CHROOT_DIR}/boot/vmlinuz-"* "${ISO_DIR}/live/vmlinuz"
+cp "${CHROOT_DIR}/boot/initrd.img-"* "${ISO_DIR}/live/initrd"
 
-cat <<'HUB_SVG' > /usr/share/icons/hicolor/scalable/apps/axiom-apphub.svg
-<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-  <path d="M50 15 L85 75 L50 90 L15 75 Z" fill="white"/>
-  <path d="M50 15 L50 90" stroke="#1A1B26" stroke-width="2"/>
-</svg>
-HUB_SVG
+# Compress Root Filesystem into SquashFS
+mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" -comp xz -noappend
 
-cp /etc/axiom/ui/branding/axiom-logo.svg /usr/share/icons/hicolor/scalable/apps/axiom-launcher.svg
+# Calculate filesystem size for casper
+printf $(du -sx --block-size=1 "${CHROOT_DIR}" | cut -f1) > "${ISO_DIR}/live/filesystem.size"
 
-# 2. Pro Utilities & Hardware Fixer
-if [ ! -f /etc/wireguard/axiom0.key ]; then
-    wg genkey | tee /etc/wireguard/axiom0.key | wg pubkey | tee /etc/wireguard/axiom0.pub > /dev/null
-fi
-
-wget -q https://github.com/erebe/greenclip/releases/download/v4.2/greenclip -O /usr/local/bin/greenclip
-chmod +x /usr/local/bin/greenclip
-
-cat <<'VOID_EOT' > /usr/local/bin/axiom-void
-#!/bin/bash
-bwrap --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /bin /bin --ro-bind /etc /etc \
-      --proc /proc --dev /dev --tmpfs /tmp --tmpfs /home --unshare-all --share-net --die-with-parent "$@"
-VOID_EOT
-chmod +x /usr/local/bin/axiom-void
-
-cat <<'HW_EOT' > /usr/local/bin/axiom-hw-fix
-#!/bin/bash
-echo "Probing hardware for compatibility..."
-hw-probe -all -upload
-fwupdmgr get-updates && fwupdmgr update
-HW_EOT
-chmod +x /usr/local/bin/axiom-hw-fix
-
-# 3. Ecosystem & Autostart (Continuity)
-mkdir -p /etc/skel/.config/autostart
-cp /usr/share/applications/org.kde.kdeconnect.daemon.desktop /etc/skel/.config/autostart/
-
-# 4. Desktop Entries
-cat <<'FILES_EOT' > /usr/share/applications/axiom-files.desktop
-[Desktop Entry]
-Name=Files
-Exec=dolphin %u
-Icon=system-file-manager
-Type=Application
-Categories=System;FileTools;
-GenericName=File Browser
-FILES_EOT
-
-# 5. Media Transcoder Action
-mkdir -p /etc/skel/.local/share/nemo/actions
-cat <<'NEMO_EOT' > /etc/skel/.local/share/nemo/actions/transcode_mp4.nemo_action
-[Nemo Action]
-Active=true
-Name=Transcode to MP4 (Axiom Core)
-Exec=ffmpeg -i %f -c:v libx264 -crf 23 -c:a aac -b:a 192k %f.mp4
-Selection=s
-Extensions=mkv;avi;mov;webm;
-NEMO_EOT
-
-# 6. Theme & UI
-cat <<'KDE_EOT' > /etc/skel/.config/kdeglobals
-[Icons]
-Theme=Papirus-Dark
-[General]
-ColorScheme=BreezeDark
-KDE_EOT
-
-# 7. Manual UI Toggle
-cat <<'MODE_EOT' > /usr/local/bin/axiom-mode-toggle
-#!/bin/bash
-MSG="<b>Interface Selection</b>"
-MODE=$(yad --title="Settings" --text="$MSG" --button="Laptop Mode:0" --button="Tablet Mode:2" --width=350)
-if [ $? -eq 0 ]; then
-    kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key location "bottom"
-    kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key Thickness 40
-else
-    kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key location "top"
-    kwriteconfig5 --file plasma-org.kde.plasma.desktop-appletsrc --group Panels --group 1 --key Thickness 30
-fi
-busctl --user call org.kde.plasmashell /PlasmaShell org.kde.PlasmaShell refreshCurrentShell
-MODE_EOT
-chmod +x /usr/local/bin/axiom-mode-toggle
-
-echo -e "[TabletMode]\nTabletMode=never" > /etc/skel/.config/kwinrc
-
-apt-get clean
-rm -rf /var/lib/apt/lists/*
-MAIN_CHROOT_EOF
-
-# --- 4. PACKAGING ---
-VMLINUZ=$(find "$ROOT/boot" -name "vmlinuz-*-generic" | head -n 1)
-INITRD=$(find "$ROOT/boot" -name "initrd.img-*-generic" | head -n 1)
-
-sudo cp -v "$VMLINUZ" "$ISO_DIR/live/vmlinuz"
-sudo cp -v "$INITRD" "$ISO_DIR/live/initrd"
-
-sudo umount -l "$ROOT/sys" "$ROOT/proc" "$ROOT/run" "$ROOT/dev" || true
-sudo mksquashfs "$ROOT" "$ISO_DIR/live/filesystem.squashfs" -comp gzip -no-progress
-
-# Auto-boot GRUB configuration
-mkdir -p "$ISO_DIR/boot/grub"
-cat <<'GRUB_EOT' > "$ISO_DIR/boot/grub/grub.cfg"
+# --------------------------------------------------
+# 4. Generate Ventoy-Compatible GRUB Configuration
+# --------------------------------------------------
+cat <<'GRUB_EOT' > "${ISO_DIR}/boot/grub/grub.cfg"
 set default=0
-set timeout=0
+set timeout=3
 
 menuentry "Axiom OS (Live x64 UEFI/BIOS)" {
     linux /live/vmlinuz boot=casper iso-scan/filename=${iso_path} ignore_uuid quiet splash toram ---
@@ -195,7 +102,9 @@ menuentry "Axiom OS (Live x64 UEFI/BIOS)" {
 }
 GRUB_EOT
 
-sudo apt-get install -y xorriso grub-pc-bin grub-efi-amd64-bin mtools dosfstools
-grub-mkrescue -o output/AxiomOS.iso "$ISO_DIR"
+# --------------------------------------------------
+# 5. Build Hybrid UEFI/BIOS Bootable ISO Image
+# --------------------------------------------------
+grub-mkrescue -o "${OUTPUT_DIR}/AxiomOS.iso" "${ISO_DIR}" -- -volid "AXIOM_OS"
 
-echo "--- UEFI Build Complete: output/AxiomOS.iso generated ---"
+echo "ISO Build Complete: ${OUTPUT_DIR}/AxiomOS.iso"
