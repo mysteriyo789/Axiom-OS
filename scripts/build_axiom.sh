@@ -13,6 +13,16 @@ ARCH="amd64"
 
 mkdir -p "${CHROOT_DIR}" "${ISO_DIR}" "${OUTPUT_DIR}"
 
+# Cleanup function to ensure virtual filesystems are cleanly unmounted
+cleanup() {
+    echo "Cleaning up virtual filesystem mounts..."
+    umount -l "${CHROOT_DIR}/dev/pts" || true
+    umount -l "${CHROOT_DIR}/dev" || true
+    umount -l "${CHROOT_DIR}/sys" || true
+    umount -l "${CHROOT_DIR}/proc" || true
+}
+trap cleanup EXIT
+
 # --------------------------------------------------
 # 1. Bootstrap Minimal Ubuntu System
 # --------------------------------------------------
@@ -26,14 +36,6 @@ mount -t sysfs /sys "${CHROOT_DIR}/sys"
 mount --bind /dev "${CHROOT_DIR}/dev"
 mount --bind /dev/pts "${CHROOT_DIR}/dev/pts"
 
-cleanup() {
-    umount -l "${CHROOT_DIR}/dev/pts" || true
-    umount -l "${CHROOT_DIR}/dev" || true
-    umount -l "${CHROOT_DIR}/sys" || true
-    umount -l "${CHROOT_DIR}/proc" || true
-}
-trap cleanup EXIT
-
 # --------------------------------------------------
 # 2. Configure Repositories & Install Core Packages
 # --------------------------------------------------
@@ -45,8 +47,10 @@ EOF
 
 chroot "${CHROOT_DIR}" /bin/bash -s <<'CHROOT_ENV'
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends \
+export NEEDRESTART_MODE=a
+
+apt-get update -qq
+apt-get install -y -qq --no-install-recommends \
     linux-image-generic \
     live-boot \
     casper \
@@ -71,10 +75,18 @@ MODULES_EOT
 
 # Rebuild initramfs with loopback drivers embedded
 update-initramfs -u -k all
+apt-get clean
+rm -rf /tmp/* /var/lib/apt/lists/*
 CHROOT_ENV
 
 # --------------------------------------------------
-# 3. Assemble ISO Structure
+# 3. Unmount Virtual Filesystems BEFORE SquashFS
+# --------------------------------------------------
+echo "Unmounting chroot virtual filesystems prior to squashfs compression..."
+cleanup
+
+# --------------------------------------------------
+# 4. Assemble ISO Structure
 # --------------------------------------------------
 mkdir -p "${ISO_DIR}/live"
 mkdir -p "${ISO_DIR}/boot/grub"
@@ -83,14 +95,17 @@ mkdir -p "${ISO_DIR}/boot/grub"
 cp "${CHROOT_DIR}/boot/vmlinuz-"* "${ISO_DIR}/live/vmlinuz"
 cp "${CHROOT_DIR}/boot/initrd.img-"* "${ISO_DIR}/live/initrd"
 
-# Compress Root Filesystem into SquashFS
-mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" -comp xz -noappend
+# Compress Root Filesystem into SquashFS (excluding virtual system directories)
+mksquashfs "${CHROOT_DIR}" "${ISO_DIR}/live/filesystem.squashfs" \
+    -comp xz \
+    -noappend \
+    -e proc sys dev run tmp
 
 # Calculate filesystem size for casper
 printf $(du -sx --block-size=1 "${CHROOT_DIR}" | cut -f1) > "${ISO_DIR}/live/filesystem.size"
 
 # --------------------------------------------------
-# 4. Generate Ventoy-Compatible GRUB Configuration
+# 5. Generate Ventoy-Compatible GRUB Configuration
 # --------------------------------------------------
 cat <<'GRUB_EOT' > "${ISO_DIR}/boot/grub/grub.cfg"
 set default=0
@@ -103,7 +118,7 @@ menuentry "Axiom OS (Live x64 UEFI/BIOS)" {
 GRUB_EOT
 
 # --------------------------------------------------
-# 5. Build Hybrid UEFI/BIOS Bootable ISO Image
+# 6. Build Hybrid UEFI/BIOS Bootable ISO Image
 # --------------------------------------------------
 grub-mkrescue -o "${OUTPUT_DIR}/AxiomOS.iso" "${ISO_DIR}" -- -volid "AXIOM_OS"
 
