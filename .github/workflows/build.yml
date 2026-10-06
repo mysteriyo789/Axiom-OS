@@ -10,6 +10,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -23,9 +24,11 @@ jobs:
           sudo rm -rf /usr/local/.ghcup
 
       - name: Install ISO Build Dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y -qq \
             debootstrap \
             squashfs-tools \
             xorriso \
@@ -41,7 +44,7 @@ jobs:
 
       - name: Execute ISO Build
         run: |
-          sudo ./scripts/build_axiom.sh
+          sudo -E ./scripts/build_axiom.sh
 
       - name: Verify ISO Artifact Output
         run: |
